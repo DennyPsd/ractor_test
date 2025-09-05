@@ -1,0 +1,10 @@
+[package]
+name = "file-pipe-monitor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ractor = "0.15"
+async-trait = "0.1"
+tokio = { version = "1.0", features = ["full"] }
+winapi = { version = "0.3", features = ["winbase", "handleapi", "namedpipeapi", "winerror"] }
