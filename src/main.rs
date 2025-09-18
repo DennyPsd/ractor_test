@@ -1,39 +1,35 @@
-use async_trait::async_trait;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-use std::fs;
-use std::io::Write;
-use std::path::Path;
-use std::time::Duration;
+use std::{io, time::Duration};
+
 
 // Сообщения для актора
 #[derive(Debug)]
 pub enum PipeMessage {
-    CheckFile,
+    Start,
+    Number(i32),
     Stop,
 }
 
-// Структура актора
-pub struct FileMonitor;
+pub struct PipeState {
+    calculator_ref: Option<ActorRef<PipeMessage>>,
+}
 
-//Без этого кфг не работало. Вопрос: Это включение асинхронности?
-#[cfg_attr(feature = "async-trait", crate::async_trait)]
+// Структура актора считывателя из терминала
+pub struct TextReader;
 
-//Структура Актора
-impl Actor for FileMonitor {
+impl Actor for TextReader {
     type Msg = PipeMessage;
-    type State = ();
-    type Arguments = ();
+    type State = PipeState;
+    type Arguments = ActorRef<PipeMessage>;
 
     //Вывод сообщений перед запуском
     async fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
-        _args: Self::Arguments,
+        calculator_ref: ActorRef<PipeMessage>,
     ) -> Result<Self::State, ActorProcessingErr> {
-        println!("Монитор файла pipe.txt запущен!");
-        println!("Файл: src/pipe.txt");
-        println!("Запишите в него число");
-        Ok(())
+        println!("Актор считывания запущен");
+        Ok(PipeState { calculator_ref: (Some(calculator_ref)) })
     }
 
     //Действия актора
@@ -41,117 +37,120 @@ impl Actor for FileMonitor {
         &self,
         myself: ActorRef<Self::Msg>,
         message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            PipeMessage::Start => {
+                println!("Введите число в консоль...");
+
+                if let Some(n) = read_content() {
+                    // Отправляем число в Calculator
+                    if let Some(ref calc_ref) = state.calculator_ref {
+                        calc_ref.send_message(PipeMessage::Number(n))?;
+                    }
+                }
+
+                // Повторяем через 1 секунду
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                myself.send_message(PipeMessage::Start)?;
+
+        }
+        PipeMessage::Number(n) => {
+            println!("Получено число: {}", n);
+        }
+        PipeMessage::Stop => {
+            println!("Остановка актора...");
+            myself.stop(None);
+        }
+            }
+    Ok(())
+        }
+    }
+
+
+   //Сктруктура Актора калькулятора 
+pub struct Calculator;
+
+impl Actor for Calculator {
+    type Msg = PipeMessage;
+    type State = PipeState;
+    type Arguments = ();
+
+    //Вывод сообщений перед запуском
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        _: (),
+    ) -> Result<Self::State, ActorProcessingErr> {
+        println!("Актор калькуляции запущен");
+        Ok(PipeState { calculator_ref: (None) })
+    }
+
+    async fn handle(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-
-            PipeMessage::CheckFile => {
-                // Путь к файлу
-                let file_path = "src/pipe.txt";
-                // Пытаемся прочитать файл
-                match read_file_content(file_path) {
-                    Ok(Some(content)) => {
-                        println!("Прочитано из файла: {}", content);
-                        // Обрабатываем содержимое отправляя в функцию умножения
-                        process_content(&content);
-                        // Очищаем файл после чтения
-                        if let Err(e) = clear_file(file_path) {
-                            eprintln!("Ошибка очистки файла: {}", e);
-                        }
-                    }
-                    //Если ничего нет - ничего не выводим
-                    Ok(None) => {
-                        // Файл пустой или не существует
-                    }
-                    //Обработка ошибки на случай невозможности чтения файла
-                    Err(e) => {
-                        eprintln!("Ошибка чтения файла: {}", e);
-                    }
-                }
-                // Повторная проверка через 1с. Почему в примерах именно tokio?
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                myself.send_message(PipeMessage::CheckFile)?;
-            }
-
-            PipeMessage::Stop => {
-                println!("Остановка монитора...");
-                myself.stop(Some("Остановка".to_string()));
-            }
+            PipeMessage::Start => {
         }
-        Ok(())
-    }
-}
-
-
-// Чтение содержимого файла. Это решение нашел
-fn read_file_content(file_path: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    if !Path::new(file_path).exists() {
-        return Ok(None);
-    }
-
-    let content = fs::read_to_string(file_path)?;
-    let trimmed_content = content.trim();
-    
-    if trimmed_content.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(trimmed_content.to_string()))
-    }
-}
-
-
-// Очистка файла
-fn clear_file(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(file_path)?;
-    
-    file.write_all(b"")?;
+        PipeMessage::Number(n) => {
+            println!("Калькулятор обработал число: {}", n*2);
+        }
+        PipeMessage::Stop => {
+            println!("Остановка актора...");
+            myself.stop(None);
+        }
+            }
     Ok(())
+        }
 }
 
-// Обработка содержимого файла. Умножение на два.
-fn process_content(content: &str) {
-    match content.parse::<f64>() {
-        Ok(number) => {
-            let result = number * 2.0;
-            println!("Результат: {} * 2 = {}", number, result);
+
+
+//Чтение из консоли
+fn read_content () -> Option<i32> {
+
+    let mut number_string = String::new();
+    
+    io::stdin()
+        .read_line(&mut number_string)
+        .expect("Ошибка чтения строки");
+
+let number_int = number_string.trim();
+    match number_int.parse::<i32>() {
+        Ok(i) => {
+        println!("Получено число:{}",number_int);
+        Some(i)
         }
-        Err(_) => {
-            println!("Не число: '{}'", content);
-            println!("Введите число в файл src/pipe.txt");
+
+        Err(..) => {
+            println!("Вы ввели не число: {}", number_int);
+            None
         }
     }
 }
+
 
 //Что делает это tokio? Везде его используют. А без него не работает))
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Монитор файла pipe.txt ===");
-    println!("Создайте файл src/pipe.txt и напишите в него число");
-    println!("Программа будет проверять файл каждую секунду");
-    println!("Для выхода введите 'stop'");
+    println!("=== Мониторинг консоли ===");
+
+
+    let (calculator, calculator_handle) = Calculator::spawn(None, Calculator, ())
+    .await
+    .expect("Не удалось создать калькулятор");
 
     // Создаем актор. Решение из документации.
-    let (actor, handle) = FileMonitor::spawn(None, FileMonitor, ())
+    let (text_reader, text_reader_handle) = TextReader::spawn(None, TextReader, calculator.clone())
         .await
         .expect("Не удалось создать актор");
 
-    // Запускаем проверку файла
-    actor.send_message(PipeMessage::CheckFile)?;
+    text_reader.send_message(PipeMessage::Start)?;
 
-    // Простой метод для остановки
-    let mut input = String::new();
-    while input.trim() != "stop" {
-        input.clear();
-        std::io::stdin().read_line(&mut input)?;
-    }
-
-    // Останавливаем актор
-    actor.send_message(PipeMessage::Stop)?;
-    handle.await?;
-
-    println!("Процесс остановлен");
+    text_reader_handle.await?;
+    calculator_handle.await?;
     Ok(())
 }
