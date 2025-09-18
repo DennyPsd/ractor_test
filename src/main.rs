@@ -1,17 +1,20 @@
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::{io, time::Duration};
+use regex::Regex;
 
 
 // Сообщения для актора
 #[derive(Debug)]
 pub enum PipeMessage {
     Start,
-    Number(i32),
+    Message(Vec<String>),
+    Error(String),
     Stop,
 }
 
 pub struct PipeState {
     calculator_ref: Option<ActorRef<PipeMessage>>,
+    err_handler_ref: Option<ActorRef<PipeMessage>>,
 }
 
 // Структура актора считывателя из терминала
@@ -20,16 +23,19 @@ pub struct TextReader;
 impl Actor for TextReader {
     type Msg = PipeMessage;
     type State = PipeState;
-    type Arguments = ActorRef<PipeMessage>;
+    type Arguments = (ActorRef<PipeMessage>, ActorRef<PipeMessage>);
 
     //Вывод сообщений перед запуском
     async fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
-        calculator_ref: ActorRef<PipeMessage>,
+        (calculator_ref, err_handler_ref): (ActorRef<PipeMessage>, ActorRef<PipeMessage>),
     ) -> Result<Self::State, ActorProcessingErr> {
         println!("Актор считывания запущен");
-        Ok(PipeState { calculator_ref: (Some(calculator_ref)) })
+        Ok(PipeState { 
+            calculator_ref: Some(calculator_ref),
+            err_handler_ref: Some(err_handler_ref),
+         })
     }
 
     //Действия актора
@@ -41,13 +47,23 @@ impl Actor for TextReader {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             PipeMessage::Start => {
-                println!("Введите число в консоль...");
+                println!("Введите выражение в консоль (например 2+4)");
 
-                if let Some(n) = read_content() {
-                    // Отправляем число в Calculator
-                    if let Some(ref calc_ref) = state.calculator_ref {
-                        calc_ref.send_message(PipeMessage::Number(n))?;
+                match read_content() {
+                    Some(text) => {
+                        println!("Прочитано: {:?}", text);
+                        if let Some(ref calc_ref) = state.calculator_ref {
+                            calc_ref.send_message(PipeMessage::Message(text))?;
+                        }
                     }
+                    None => {
+                        let error_msg = "Неверный формат выражения.".to_string();
+                        println!("{}", error_msg);
+                        if let Some(ref err_ref) = state.err_handler_ref {
+                            err_ref.send_message(PipeMessage::Error(error_msg))?;
+                        }
+                    }
+                    
                 }
 
                 // Повторяем через 1 секунду
@@ -55,14 +71,13 @@ impl Actor for TextReader {
                 myself.send_message(PipeMessage::Start)?;
 
         }
-        PipeMessage::Number(n) => {
-            println!("Получено число: {}", n);
-        }
         PipeMessage::Stop => {
             println!("Остановка актора...");
             myself.stop(None);
         }
-            }
+        _=> {}
+            } 
+            
     Ok(())
         }
     }
@@ -83,7 +98,10 @@ impl Actor for Calculator {
         _: (),
     ) -> Result<Self::State, ActorProcessingErr> {
         println!("Актор калькуляции запущен");
-        Ok(PipeState { calculator_ref: (None) })
+        Ok(PipeState {
+            calculator_ref:None,
+            err_handler_ref: None,
+        })
     }
 
     async fn handle(
@@ -93,42 +111,77 @@ impl Actor for Calculator {
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            PipeMessage::Start => {
-        }
-        PipeMessage::Number(n) => {
-            println!("Калькулятор обработал число: {}", n*2);
-        }
+            PipeMessage::Start => {}
         PipeMessage::Stop => {
             println!("Остановка актора...");
             myself.stop(None);
         }
+        _ => {}
             }
     Ok(())
         }
 }
 
 
+pub struct OutActor;
+
+impl Actor for OutActor {
+    type Msg = PipeMessage;
+    type State = ();
+    type Arguments = ();
+    
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        _:(),
+    ) -> Result<Self::State, ActorProcessingErr> {
+        println!("Актор вывода сообщений запущен!");
+        Ok(())
+    }
+
+    async fn handle (
+        &self,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        _state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message{
+            PipeMessage::Error(msg) => {
+                println!("Ошибка{}", msg);
+            }
+            PipeMessage::Stop => {
+                println!("Остановка актора вывода...");
+                myself.stop(None);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+
 
 //Чтение из консоли
-fn read_content () -> Option<i32> {
+fn read_content () -> Option<Vec<String>> {
 
-    let mut number_string = String::new();
+    let mut input = String::new();
     
     io::stdin()
-        .read_line(&mut number_string)
+        .read_line(&mut input)
         .expect("Ошибка чтения строки");
 
-let number_int = number_string.trim();
-    match number_int.parse::<i32>() {
-        Ok(i) => {
-        println!("Получено число:{}",number_int);
-        Some(i)
-        }
+let input = input.trim();
+let re = Regex::new(r"^\s*([0-9]+)\s*([+\-*/])\s*([0-9]+)\s*$").unwrap();
+    if let Some(cap) = re.captures(input) {
+        let first = cap.get(1).unwrap().as_str().to_string();
+        let mid= cap.get(2).unwrap().as_str().to_string();
+        let right = cap.get(3).unwrap().as_str().to_string();
 
-        Err(..) => {
-            println!("Вы ввели не число: {}", number_int);
-            None
-        }
+        println!("Получено выражение: {} {} {}", first, mid, right);
+        Some(vec![first, mid, right])
+    } else {
+        println!("Ввели неверное выражение: {}", input);
+        None
     }
 }
 
@@ -138,15 +191,19 @@ let number_int = number_string.trim();
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Мониторинг консоли ===");
 
-
+    //Спавним акторы без ссылок
     let (calculator, calculator_handle) = Calculator::spawn(None, Calculator, ())
     .await
-    .expect("Не удалось создать калькулятор");
+    .expect("Не удалось создать актор калькулятора");
 
-    // Создаем актор. Решение из документации.
-    let (text_reader, text_reader_handle) = TextReader::spawn(None, TextReader, calculator.clone())
+    let (err_handler, err_handler_handler) = OutActor::spawn(None,OutActor,())
+    .await
+    .expect("Не удалось создать актор вывода");
+
+    //Спавним актор чтения и передаем две ссылки в него
+    let (text_reader, text_reader_handle) = TextReader::spawn(None, TextReader, (calculator.clone(), err_handler.clone()))
         .await
-        .expect("Не удалось создать актор");
+        .expect("Не удалось создать актор чтения");
 
     text_reader.send_message(PipeMessage::Start)?;
 
