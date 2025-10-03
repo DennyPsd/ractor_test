@@ -9,3 +9,6 @@ async-trait = "0.1"
 tokio = { version = "1.0", features = ["full"] }
 winapi = { version = "0.3", features = ["winbase", "handleapi", "namedpipeapi", "winerror"] }
 regex = "1"
+chumsky = "0.9"
+tracing = "0.1"
+tracing-subscriber = "0.3"

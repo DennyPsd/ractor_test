@@ -1,13 +1,15 @@
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::{io, time::Duration};
-use regex::Regex;
-
+//use regex::Regex;
+use chumsky::prelude::*;
+use tracing::{info, warn};
+use tracing_subscriber;
 
 // Сообщения для акторов
 #[derive(Debug)]
 pub enum PipeMessage {
     Start,
-    Message(Vec<String>),
+    Message(String),
     Error(String),
     Result(String),
     Stop,
@@ -18,6 +20,21 @@ pub struct PipeState {
     calculator_ref: Option<ActorRef<PipeMessage>>,
     err_handler_ref: Option<ActorRef<PipeMessage>>,
     out_actor_ref: Option<ActorRef<PipeMessage>>,
+}
+
+// Параметры выражения для калькулятора
+#[derive(Clone)]
+pub enum Expression {
+    Numb(i32),
+    Operator(Op, Box<Expression>, Box<Expression>),
+}
+
+#[derive(Clone)]
+pub enum Op {
+    Plus,
+    Minus,
+    Mul,
+    Div,
 }
 
 // Структура актора считывателя из терминала
@@ -34,7 +51,7 @@ impl Actor for TextReader {
         _myself: ActorRef<Self::Msg>,
         (calculator_ref, err_handler_ref): (ActorRef<PipeMessage>, ActorRef<PipeMessage>),
     ) -> Result<Self::State, ActorProcessingErr> {
-        println!("Актор считывания запущен");
+        info!("Актор считывания запущен");
         Ok(PipeState { 
             calculator_ref: Some(calculator_ref),
             err_handler_ref: Some(err_handler_ref),
@@ -54,14 +71,14 @@ impl Actor for TextReader {
 
                 match read_content() {
                     Some(text) => {
-                        println!("Прочитано: {:?}", text);
+                        info!("Прочитано: {:?}", text);
                         if let Some(ref calc_ref) = state.calculator_ref {
                             calc_ref.send_message(PipeMessage::Message(text))?;
                         }
                     }
                     None => {
                         let error_msg = "Неверный формат выражения.".to_string();
-                        println!("{}", error_msg);
+                        warn!("{}", error_msg);
                         if let Some(ref err_ref) = state.err_handler_ref {
                             err_ref.send_message(PipeMessage::Error(error_msg))?;
                         }
@@ -75,7 +92,7 @@ impl Actor for TextReader {
 
         }
         PipeMessage::Stop => {
-            println!("Остановка актора...");
+            info!("Остановка актора...");
             myself.stop(None);
         }
         _=> {}
@@ -100,7 +117,7 @@ impl Actor for Calculator {
         _myself: ActorRef<Self::Msg>,
         out_actor_ref: ActorRef<PipeMessage>,
     ) -> Result<Self::State, ActorProcessingErr> {
-        println!("Актор калькуляции запущен");
+        info!("Актор калькуляции запущен");
         Ok(PipeState {
             calculator_ref:None,
             err_handler_ref: None,
@@ -112,44 +129,36 @@ impl Actor for Calculator {
         &self,
         myself: ActorRef<Self::Msg>,
         message: Self::Msg,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             PipeMessage::Start => {}
             PipeMessage::Message(parts) => {
+                 //Парсим выражение EDITED
+                 //Изменение на парсер chumsky
+                let parsed = parser().parse(parts.chars().collect::<Vec<_>>());
 
-                //Парсим полученные части в числа
-                let left_str = &parts[0];
-                let left_int = match left_str.parse::<i32>(){
-                    Ok(n) => n,
-                    Err(_) => return Ok(()),
+                let result_msg = match parsed {
+                    Ok(expr) => {
+                        //Вычисляем дерево выражений
+                        match op_action(&expr) {
+                            Ok(val) => PipeMessage::Result(val.to_string()),
+                            Err(e) => PipeMessage::Error(e),
+                        }
+                    }
+                    Err(errors) => {
+                        //Формируем сообщение об ошибке парсинга
+                        let err_str = format!("Ошибка парсинга: {:?}", errors);
+                        PipeMessage::Error(err_str)
+                    }
                 };
-
-                let operator = &parts[1];
-
-                let right_str = &parts[2];
-                let right_int = match right_str.parse::<i32>() {
-                    Ok(n) => n,
-                    Err(_) => return Ok(()),
-                };
-
-                //Проверка оператора выражения и вычисление значения
-                let result = match operator.as_str() {
-                    "+" => left_int + right_int,
-                    "-" => left_int - right_int,
-                    "*" => left_int * right_int,
-                    "/" => if right_int !=0 {left_int / right_int} else {return Ok(());},
-                    _ => return Ok(())
-                };
-
-                let result_str = format!("{} {} {} = {}", left_int, operator, right_int, result);
-                if let Some(ref out_ref) = _state.out_actor_ref {
-                    out_ref.send_message(PipeMessage::Result(result_str))?;
+                // Отправляем результат или ошибку
+                if let Some(ref out_ref) = state.out_actor_ref {
+                    out_ref.send_message(result_msg)?;
                 }
-
             }
             PipeMessage::Stop => {
-                println!("Остановка актора...");
+                info!("Остановка актора...");
                 myself.stop(None);
             }
         _ => {}
@@ -160,6 +169,7 @@ impl Actor for Calculator {
 
 
 //Структура Актора вывода сообщения
+//Пока не удалял, думаю
 pub struct OutActor;
 
 impl Actor for OutActor {
@@ -172,7 +182,7 @@ impl Actor for OutActor {
         _myself: ActorRef<Self::Msg>,
         _:(),
     ) -> Result<Self::State, ActorProcessingErr> {
-        println!("Актор вывода сообщений запущен!");
+        info!("Актор вывода сообщений запущен!");
         Ok(())
     }
 
@@ -184,13 +194,13 @@ impl Actor for OutActor {
     ) -> Result<(), ActorProcessingErr> {
         match message{
             PipeMessage::Error(msg) => {
-                println!("Ошибка: {}", msg);
+                warn!("Ошибка: {}", msg);
             }
             PipeMessage::Result(result_str) => { 
                 println!("Актор вывода выдал результат: {}", result_str);
             }
             PipeMessage::Stop => {
-                println!("Остановка актора вывода...");
+                info!("Остановка актора вывода...");
                 myself.stop(None);
             }
             _ => {}
@@ -201,8 +211,9 @@ impl Actor for OutActor {
 
 
 
-//Чтение из консоли регулярным выражением
-fn read_content () -> Option<Vec<String>> {
+//Чтение из консоли регулярным выражением EDITED
+//Переделал на простое чтение строки
+fn read_content () -> Option<String> {
 
     let mut input = String::new();
     
@@ -210,20 +221,76 @@ fn read_content () -> Option<Vec<String>> {
         .read_line(&mut input)
         .expect("Ошибка чтения строки");
 
-let input = input.trim();
-let re = Regex::new(r"^\s*([0-9]+)\s*([+\-*/])\s*([0-9]+)\s*$").unwrap();
-    
-    //Разбиваем выражение на 3 части
-    if let Some(cap) = re.captures(input) {
-        let first = cap.get(1).unwrap().as_str().to_string();
-        let mid= cap.get(2).unwrap().as_str().to_string();
-        let right = cap.get(3).unwrap().as_str().to_string();
+    let input = input.trim().to_string();
 
-        println!("Получено выражение: {} {} {}", first, mid, right);
-        Some(vec![first, mid, right])
-    } else {
-        println!("Ввели неверное выражение: {}", input);
+    if input.is_empty() {
         None
+    } else {
+        Some(input)
+    }
+
+}
+
+//Парсер chumsky
+//Тут вопрос. Пробовал версию библы 0.11, но там не получилось инициализировать парсер 237 строчкой. 
+//Откатился до 0.9 и все ок. Надо понять, что изменилось
+fn parser() -> impl Parser<char, Expression, Error = Simple<char>> {
+    recursive(|expr| {
+
+        //Разбор обычного числа
+        let int = text::int(10)
+            .map(|s: String| s.parse::<i32>().unwrap_or(0))
+            .map(Expression::Numb);
+
+        //Разбор выражения в скобках с определением чисел внутри
+        let skobki = int
+            .or(expr.delimited_by(just('('), just(')')))
+            .padded();
+
+        //Разбор выражения с * и /
+        let priority = skobki.clone()
+            .then(
+                just('*').to(Op::Mul)
+                    .or(just('/').to(Op::Div))
+                    .then(skobki)
+                    .repeated(),
+            )
+            .foldl(|lhs, (op, rhs)| Expression::Operator(op, Box::new(lhs), Box::new(rhs)));
+
+        //Разбор после приоритетного выражения + и -
+        let sum = priority.clone()
+            .then(
+                just('+').to(Op::Plus)
+                    .or(just('-').to(Op::Minus))
+                    .then(priority)
+                    .repeated(),
+            )
+            .foldl(|lhs, (op, rhs)| Expression::Operator(op, Box::new(lhs), Box::new(rhs)));
+
+        sum
+    })
+}
+
+//Функция вычисления дерева выражений
+fn op_action(expr: &Expression) -> Result<i32, String> {
+    match expr {
+        Expression::Numb(n) => Ok(*n),
+        Expression::Operator(op, l, r) => {
+            let lv = op_action(l)?;
+            let rv = op_action(r)?;
+            match op {
+                Op::Plus => Ok(lv + rv),
+                Op::Minus => Ok(lv - rv),
+                Op::Mul => Ok(lv * rv),
+                Op::Div => {
+                    if rv == 0 {
+                        Err("Нельзя делить на 0".to_string())
+                    } else {
+                        Ok(lv / rv)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -231,7 +298,7 @@ let re = Regex::new(r"^\s*([0-9]+)\s*([+\-*/])\s*([0-9]+)\s*$").unwrap();
 //Настройка компилятора и main fn
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Мониторинг консоли ===");
+    tracing_subscriber::fmt::init();
 
     //Спавним акторы без ссылок
     let (text_writer, text_writer_handler) = OutActor::spawn(None,OutActor,())
@@ -247,10 +314,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("Не удалось создать актор чтения");
 
+    println!("=== Мониторинг консоли ===");
+
     text_reader.send_message(PipeMessage::Start)?;
 
     text_reader_handle.await?;
     calculator_handle.await?;
     text_writer_handler.await?;
+
     Ok(())
+
 }
