@@ -5,6 +5,11 @@ use chumsky::prelude::*;
 use tracing::{info, warn};
 use tracing_subscriber;
 
+//Тестирую подключение модулей
+mod module;
+use crate::module::modules;
+
+
 // Сообщения для акторов
 #[derive(Debug)]
 pub enum PipeMessage {
@@ -67,10 +72,26 @@ impl Actor for TextReader {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             PipeMessage::Start => {
-                println!("Введите выражение в консоль (например 2+4)");
+                println!("Введите выражение в консоль (например (2+2)*4)) или stop для завершения");
 
                 match read_content() {
                     Some(text) => {
+
+                        //Доделал возможность остановки фразой stop
+                        if text.eq_ignore_ascii_case("stop"){
+                            info!("Получена команда остановки...");
+                            
+                            if let Some(ref calc_ref) = state.calculator_ref{
+                                calc_ref.send_message(PipeMessage::Stop);
+                            }
+                            if let Some(ref calc_ref) = state.err_handler_ref{
+                                calc_ref.send_message(PipeMessage::Stop);
+                            }
+
+                            myself.send_message(PipeMessage::Stop);
+                            return Ok(());
+                        }
+
                         info!("Прочитано: {:?}", text);
                         if let Some(ref calc_ref) = state.calculator_ref {
                             calc_ref.send_message(PipeMessage::Message(text))?;
@@ -92,7 +113,7 @@ impl Actor for TextReader {
 
         }
         PipeMessage::Stop => {
-            info!("Остановка актора...");
+            info!("Остановка актора чтения...");
             myself.stop(None);
         }
         _=> {}
@@ -158,7 +179,7 @@ impl Actor for Calculator {
                 }
             }
             PipeMessage::Stop => {
-                info!("Остановка актора...");
+                info!("Остановка актора калькулятора...");
                 myself.stop(None);
             }
         _ => {}
@@ -314,8 +335,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("Не удалось создать актор чтения");
 
-    println!("=== Мониторинг консоли ===");
+    //Функции из сторонних модулей
+    modules::test_fn();
+    modules::test_fn2();
 
+    println!("=== Мониторинг консоли ===");
     text_reader.send_message(PipeMessage::Start)?;
 
     text_reader_handle.await?;
